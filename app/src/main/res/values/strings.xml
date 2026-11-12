@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Butan</string>
+    <string name="hce_description">Butan phone-to-phone envelope transfer</string>
+    <string name="hce_aid_group">Butan ISO-DEP exchange</string>
+</resources>
