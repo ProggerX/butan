@@ -22,17 +22,20 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Phone
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -65,13 +68,11 @@ fun TransferScreen(
     contentPadding: PaddingValues,
     onShareOwn: () -> Unit,
     onShareContact: (Contact) -> Unit,
-    onRetry: (String) -> Unit,
+    onDelete: (String) -> Unit,
 ) {
     var showContacts by rememberSaveable { mutableStateOf(false) }
-    val pending = remember(state.queue) { state.queue.filter { it.passedAt == null }.sortedBy { it.addedAt } }
-    val passed = remember(state.queue) {
-        state.queue.filter { it.passedAt != null }.sortedByDescending { it.passedAt }
-    }
+    val pending = remember(state.queue) { state.queue.sortedBy { it.addedAt } }
+    val transfers = remember(state.queue) { state.queue.sumOf { it.passCount } }
 
     LazyColumn(
         modifier = Modifier
@@ -83,7 +84,7 @@ fun TransferScreen(
         item {
             TransferHero(
                 pending = pending.size,
-                passed = passed.size,
+                transfers = transfers,
                 contacts = state.contacts.size,
             )
         }
@@ -117,11 +118,11 @@ fun TransferScreen(
 
         item {
             SectionHeader(
-                title = "Готово к передаче",
+                title = "В очереди",
                 detail = when {
                     pending.isEmpty() -> null
-                    pending.size == 1 -> "1 элемент"
-                    else -> "${pending.size} элемента"
+                    pending.size == 1 -> "1 элемент · уходит при касании"
+                    else -> "${pending.size} элемента · уходят при касании"
                 },
             )
         }
@@ -143,23 +144,7 @@ fun TransferScreen(
                 TransferCard(
                     item = item,
                     state = state,
-                    onRetry = { onRetry(item.id) },
-                )
-            }
-        }
-
-        if (passed.isNotEmpty()) {
-            item {
-                SectionHeader(
-                    title = "Уже передано",
-                    detail = "${passed.size} · остались у вас",
-                )
-            }
-            items(passed, key = { it.id }) { item ->
-                TransferCard(
-                    item = item,
-                    state = state,
-                    onRetry = { onRetry(item.id) },
+                    onDelete = { onDelete(item.id) },
                 )
             }
         }
@@ -167,9 +152,8 @@ fun TransferScreen(
         item {
             InfoCard(
                 title = "Передача ничего не удаляет",
-                body = "После успешного обмена сообщение остаётся в чате и в этой вкладке. " +
-                    "Отметка «Передано» — это история, а не удаление. Кнопка «Ещё раз» возвращает " +
-                    "элемент в очередь.",
+                body = "После обмена элемент остаётся в очереди и уйдёт снова при следующем касании. " +
+                    "Он также остаётся в чате. Убрать его из очереди можно через меню ⋮ на карточке.",
                 icon = Icons.Default.CheckCircle,
             )
         }
@@ -189,7 +173,7 @@ fun TransferScreen(
 }
 
 @Composable
-private fun TransferHero(pending: Int, passed: Int, contacts: Int) {
+private fun TransferHero(pending: Int, transfers: Int, contacts: Int) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.extraLarge,
@@ -229,8 +213,8 @@ private fun TransferHero(pending: Int, passed: Int, contacts: Int) {
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TransferStat("$pending", "ждут")
-                TransferStat("$passed", "передано")
+                TransferStat("$pending", "в очереди")
+                TransferStat("$transfers", "передач")
                 TransferStat("$contacts", "контактов")
             }
         }
@@ -307,9 +291,10 @@ private fun NfcStatusCard(beam: BeamState) {
 private fun TransferCard(
     item: QueueItem,
     state: AppState,
-    onRetry: () -> Unit,
+    onDelete: () -> Unit,
 ) {
-    val pending = item.passedAt == null
+    var menuOpen by remember(item.id) { mutableStateOf(false) }
+    var confirmDelete by rememberSaveable(item.id) { mutableStateOf(false) }
     val accent = when (item.kind) {
         TransferKind.OUTGOING -> MaterialTheme.colorScheme.primaryContainer
         TransferKind.RELAY -> MaterialTheme.colorScheme.tertiaryContainer
@@ -330,14 +315,15 @@ private fun TransferCard(
         TransferKind.RELAY -> "Транзитный конверт для другого получателя"
         TransferKind.CONTACT -> "Подписанная карточка · ${shortKey(item.peerAge ?: "")}"
     }
+    val delivered = item.passCount > 0
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.extraLarge,
-        color = if (pending) {
-            MaterialTheme.colorScheme.surfaceContainerLow
-        } else {
+        color = if (delivered) {
             MaterialTheme.colorScheme.surfaceContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerLow
         },
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
@@ -372,11 +358,47 @@ private fun TransferCard(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                Spacer(Modifier.width(8.dp))
-                if (pending) {
-                    StatusPill("Ждёт", Icons.Default.Phone, MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(6.dp))
+                if (delivered) {
+                    StatusPill(
+                        "Передано ×${item.passCount}",
+                        Icons.Default.CheckCircle,
+                        MaterialTheme.colorScheme.primary,
+                    )
                 } else {
-                    StatusPill("Передано", Icons.Default.CheckCircle, MaterialTheme.colorScheme.primary)
+                    StatusPill("Ждёт", Icons.Default.Phone, MaterialTheme.colorScheme.primary)
+                }
+                Box {
+                    IconButton(
+                        onClick = { menuOpen = true },
+                        modifier = Modifier.size(34.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MoreVert,
+                            contentDescription = "Действия с элементом",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = menuOpen,
+                        onDismissRequest = { menuOpen = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Удалить из очереди", color = MaterialTheme.colorScheme.error) },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Delete,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.error,
+                                )
+                            },
+                            onClick = {
+                                menuOpen = false
+                                confirmDelete = true
+                            },
+                        )
+                    }
                 }
             }
 
@@ -392,36 +414,55 @@ private fun TransferCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f),
                 )
-                if (!pending) {
-                    Text(
-                        text = buildString {
+                Text(
+                    text = if (delivered) {
+                        buildString {
+                            append("Передано ")
                             append(formatRelative(item.passedAt ?: 0L))
                             if (item.passCount > 1) append(" · ${item.passCount} раза")
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    TextButton(
-                        onClick = onRetry,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = null,
-                            modifier = Modifier.size(14.dp),
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        Text("Ещё раз", style = MaterialTheme.typography.labelSmall)
-                    }
-                } else {
-                    Text(
-                        text = formatRelative(item.addedAt),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                        }
+                    } else {
+                        formatRelative(item.addedAt)
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            icon = { Icon(Icons.Default.Delete, contentDescription = null) },
+            title = { Text("Убрать из очереди?") },
+            text = {
+                Text(
+                    when (item.kind) {
+                        TransferKind.OUTGOING ->
+                            "Сообщение останется в чате, но больше не будет уходить при касании. " +
+                                "Вернуть его в очередь можно из меню сообщения."
+                        TransferKind.RELAY ->
+                            "Транзитный конверт будет удалён из очереди и не уйдёт следующему человеку."
+                        TransferKind.CONTACT ->
+                            "Карточка больше не будет передаваться. Сам контакт останется в списке чатов."
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmDelete = false
+                        onDelete()
+                    },
+                ) {
+                    Text("Убрать", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("Отмена") }
+            },
+        )
     }
 }
 

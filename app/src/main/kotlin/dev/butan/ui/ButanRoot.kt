@@ -114,13 +114,13 @@ fun ButanRoot(nfc: NfcGateway) {
                 viewModel.send(peer, peerName, body, onResult)
             },
             onDelete = viewModel::deleteMessage,
-            onRetry = viewModel::retryTransfer,
+            onRequeue = viewModel::requeueMessage,
             onMarkRead = viewModel::markConversationRead,
         )
         return
     }
 
-    val pendingCount = current.queue.count { it.passedAt == null }
+    val pendingCount = current.queue.size
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.surface,
@@ -198,7 +198,7 @@ fun ButanRoot(nfc: NfcGateway) {
                 contentPadding = innerPadding,
                 onShareOwn = viewModel::shareOwnContact,
                 onShareContact = viewModel::shareContact,
-                onRetry = viewModel::retryTransfer,
+                onDelete = viewModel::deleteTransfer,
             )
         }
     }

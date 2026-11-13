@@ -238,7 +238,7 @@ private fun ProfileHero(
                 HeroStat(value = "$chatCount", label = "чатов")
                 HeroStat(value = "$unread", label = "новых")
                 HeroStat(
-                    value = "${state.queue.count { it.passedAt == null }}",
+                    value = "${state.queue.size}",
                     label = "к передаче",
                 )
             }

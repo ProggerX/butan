@@ -20,8 +20,8 @@ the envelope in a carry queue and passes it to the next phone.
 - **Share contacts.** Send your own signed contact card or forward somebody
   else's original card from the Transfer tab.
 - **Passing does not delete.** A transferred message stays in your chat and in
-  the Transfer tab. It is marked as passed and can be put back into the queue
-  with **Ещё раз**.
+  the Transfer tab. It also stays in the outgoing queue, so it can travel on to
+  the next phone. Remove it explicitly with the card menu when you are done.
 - **age v1 / X25519** encryption. The implementation is wire-compatible with the
   reference `age` CLI for binary X25519 files.
 - **Ed25519 message signatures** so a relay cannot forge the sender. The signing
@@ -49,18 +49,18 @@ with the usual Android handles and copied. URLs are annotated with
 
 The Transfer tab is the outgoing side of the delay-tolerant network:
 
-- **Готово к передаче** — messages and contact cards that will go into the next
-  NFC bundle.
-- **Уже передано** — items that were already written to another phone. They are
-  not removed. **Ещё раз** clears the passed mark and returns an item to the
-  queue.
+- **В очереди** — messages and contact cards that will go into the next NFC
+  bundle. Items stay here after a hand-off and are offered again, so a relay can
+  pass the same envelope to several people.
 - **Мой контакт** — queues your signed contact card.
 - **Другой контакт** — lets you pick a saved contact and forward its original
   signed card. Contact cards are self-signed by their owner, so the app forwards
   the exact stored bytes instead of trying to rebuild the card.
 
 When a bundle is written successfully, items are only marked as passed
-(`passedAt`); the chat message and its transfer entry remain in local storage.
+(`passedAt` + `passCount`); the chat message and its transfer entry remain in
+local storage and in the queue. The card menu can remove a queue entry without
+touching the chat history.
 
 ## How a transfer works
 
@@ -126,8 +126,9 @@ The app stores its identity seed and state in app-private internal storage.
 - A relay that receives an envelope not addressed to it cannot read it, but it
   can drop it. This is a delay-tolerant design, not a guaranteed delivery
   network.
-- A passed message is not offered again automatically. Use **Ещё раз** in the
-  Transfer tab to share it with one more person.
+- A queued message keeps being offered in every bundle until you remove it with
+  the card menu. That is intentional for relaying, but it also means the queue
+  can grow; prune it from time to time.
 
 ## Development with Nix
 
@@ -182,7 +183,7 @@ The main versions are declared in `gradle/libs.versions.toml`:
 - Bouncy Castle 1.86 (X25519, Ed25519, ChaCha20-Poly1305, HKDF, HMAC)
 - compileSdk 37 (minor 0), minSdk 28, targetSdk 37
 
-The app version for the two-tab UI is `0.5.0` (`versionCode 6`).
+The app version is `5.1` (`versionCode 7`).
 
 ## Project layout
 

@@ -94,10 +94,21 @@ class ButanViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun retryTransfer(id: String) {
+    fun deleteTransfer(id: String) {
         viewModelScope.launch {
-            store.retryTransfer(id)
-            _events.emit("Снова ждёт передачи")
+            val removed = runCatching { store.deleteTransfer(id) }.getOrDefault(false)
+            _events.emit(
+                if (removed) "Убрано из очереди передачи" else "Элемент уже не в очереди",
+            )
+        }
+    }
+
+    fun requeueMessage(messageId: String) {
+        viewModelScope.launch {
+            val queued = runCatching { store.requeueMessage(messageId) }.getOrDefault(false)
+            _events.emit(
+                if (queued) "Сообщение снова ждёт передачи" else "Не удалось вернуть сообщение в очередь",
+            )
         }
     }
 
@@ -256,8 +267,8 @@ class ButanViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Builds one bundle: our own card, every contact card we were asked to pass,
-     * and all pending envelopes. Already transferred items are not offered again
-     * until the user explicitly returns them to the queue.
+     * and all queued envelopes. Items stay in the queue after a hand-off and
+     * keep travelling until the user removes them.
      */
     private fun buildBundle(current: AppState): BuiltBundle {
         val entries = mutableListOf<BundleEntry>()
@@ -270,7 +281,6 @@ class ButanViewModel(application: Application) : AndroidViewModel(application) {
         cardKeys += base64(ownCard)
 
         val pending = current.queue
-            .filter { it.passedAt == null }
             .sortedBy { it.addedAt }
 
         for (item in pending) {

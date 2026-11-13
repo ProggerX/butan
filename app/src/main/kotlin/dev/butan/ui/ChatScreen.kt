@@ -94,7 +94,7 @@ fun ChatScreen(
     onBack: () -> Unit,
     onSend: (String, (Boolean) -> Unit) -> Unit,
     onDelete: (String) -> Unit,
-    onRetry: (String) -> Unit,
+    onRequeue: (String) -> Unit,
     onMarkRead: (String) -> Unit,
 ) {
     BackHandler(onBack = onBack)
@@ -197,7 +197,7 @@ fun ChatScreen(
                                 runCatching { uriHandler.openUri(url) }
                                     .onFailure { notify("Не удалось открыть ссылку") }
                             },
-                            onRetry = { queueItem?.let { onRetry(it.id) } },
+                            onRequeue = { onRequeue(message.id) },
                             onDelete = { onDelete(message.id) },
                         )
                     }
@@ -328,7 +328,7 @@ private fun MessageBubble(
     queueItem: QueueItem?,
     onCopy: () -> Unit,
     onOpenLink: (String) -> Unit,
-    onRetry: () -> Unit,
+    onRequeue: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val links = remember(message.body) { extractLinks(message.body) }
@@ -415,13 +415,13 @@ private fun MessageBubble(
                                         },
                                     )
                                 }
-                                if (outgoing && queueItem?.passedAt != null) {
+                                if (outgoing && queueItem == null) {
                                     DropdownMenuItem(
-                                        text = { Text("Вернуть в очередь") },
+                                        text = { Text("Вернуть в передачу") },
                                         leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
                                         onClick = {
                                             menuOpen = false
-                                            onRetry()
+                                            onRequeue()
                                         },
                                     )
                                 }
@@ -475,16 +475,23 @@ private fun MessageBubble(
 @Composable
 private fun MessageStatus(message: ChatMessage, queueItem: QueueItem?) {
     val (text, icon, tint) = when {
-        message.outgoing && queueItem?.passedAt != null -> Triple(
-            "Передано",
-            Icons.Default.CheckCircle,
-            MaterialTheme.colorScheme.primary,
-        )
-        message.outgoing -> Triple(
-            "В очереди",
-            Icons.Default.Lock,
-            MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        message.outgoing -> when {
+            queueItem == null -> Triple(
+                "Не в очереди",
+                Icons.Default.Warning,
+                MaterialTheme.colorScheme.error,
+            )
+            queueItem.passCount > 0 -> Triple(
+                if (queueItem.passCount > 1) "Передано ×${queueItem.passCount}" else "Передано",
+                Icons.Default.CheckCircle,
+                MaterialTheme.colorScheme.primary,
+            )
+            else -> Triple(
+                "В очереди",
+                Icons.Default.Lock,
+                MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         message.verified -> Triple(
             "Подпись",
             Icons.Default.CheckCircle,

@@ -177,9 +177,9 @@ class ButanStore(
     }
 
     /**
-     * Marks items as handed to another phone without deleting them. They stay
-     * in [AppState.queue] and in the chat history, and can be re-armed with
-     * [retryTransfer].
+     * Records a successful hand-off without deleting anything. The item stays
+     * in [AppState.queue], keeps travelling in later bundles and remains in the
+     * chat history; [QueueItem.passCount] is the hand-off history.
      */
     suspend fun markTransferred(ids: Collection<String>) = mutex.withLock {
         if (ids.isEmpty()) return@withLock
@@ -195,15 +195,66 @@ class ButanStore(
         applyLocked(current.copy(queue = nextQueue))
     }
 
-    suspend fun retryTransfer(id: String) = mutex.withLock {
+    /**
+     * Removes one transfer queue entry. A chat message linked to it is kept:
+     * deleting an outgoing message is a separate action in the chat.
+     */
+    suspend fun deleteTransfer(id: String): Boolean = mutex.withLock {
         val current = checkLoaded()
+        if (current.queue.none { it.id == id }) return@withLock false
         applyLocked(
             current.copy(
-                queue = current.queue.map {
-                    if (it.id == id) it.copy(passedAt = null) else it
+                queue = current.queue.filterNot { it.id == id },
+                messages = current.messages.map {
+                    if (it.queueId == id) it.copy(queueId = null) else it
                 },
             ),
         )
+        true
+    }
+
+    /**
+     * Puts an outgoing chat message back into the transfer queue after its
+     * queue entry was deleted. The original message text and timestamp are
+     * reused; a fresh encrypted envelope is created for the same recipient.
+     */
+    suspend fun requeueMessage(messageId: String): Boolean = mutex.withLock {
+        val current = checkLoaded()
+        val message = current.messages.firstOrNull { it.id == messageId && it.outgoing }
+            ?: return@withLock false
+        if (current.queue.any { it.messageId == messageId }) return@withLock true
+
+        val now = System.currentTimeMillis()
+        val envelope = runCatching {
+            Butan.createEnvelope(
+                identity = current.identity,
+                recipient = message.peerAge,
+                fromName = current.profileName,
+                body = message.body,
+                nowSeconds = now / 1000,
+            )
+        }.getOrNull() ?: return@withLock false
+
+        val item = QueueItem(
+            id = UUID.randomUUID().toString(),
+            kind = TransferKind.OUTGOING,
+            ciphertext = Butan.envelopeToText(envelope),
+            addedAt = now,
+            mine = true,
+            label = "Для ${message.peerName}",
+            peerAge = message.peerAge,
+            peerName = message.peerName,
+            messageId = message.id,
+        )
+        applyLocked(
+            current.copy(
+                queue = current.queue + item,
+                messages = current.messages.map {
+                    if (it.id == message.id) it.copy(queueId = item.id) else it
+                },
+            ),
+        )
+        true
     }
 
     suspend fun deleteMessage(id: String) = mutex.withLock {
@@ -253,12 +304,10 @@ class ButanStore(
         } ?: return@withLock null
 
         val existing = current.queue.firstOrNull {
-            it.kind == TransferKind.CONTACT &&
-                it.peerAge == contact.age &&
-                it.passedAt == null
+            it.kind == TransferKind.CONTACT && it.peerAge == contact.age
         }
         if (existing != null) {
-            // Keep a pending self-card up to date with the current name.
+            // Keep a queued self-card up to date with the current name.
             if (contact.age == current.identity.ageRecipient) {
                 val refreshed = existing.copy(
                     card = base64(cardBytes),
@@ -304,9 +353,7 @@ class ButanStore(
         // Reuse the same code path without taking the mutex twice.
         val cardBytes = Butan.createContactCard(current.identity, current.profileName)
         val existing = current.queue.firstOrNull {
-            it.kind == TransferKind.CONTACT &&
-                it.peerAge == self.age &&
-                it.passedAt == null
+            it.kind == TransferKind.CONTACT && it.peerAge == self.age
         }
         if (existing != null) {
             val refreshed = existing.copy(card = base64(cardBytes), label = "Мой контакт")
@@ -337,10 +384,7 @@ class ButanStore(
         val selfAge = current.identity.ageRecipient
         val cardBytes = Butan.createContactCard(current.identity, clean)
         val queue = current.queue.map { item ->
-            if (item.kind == TransferKind.CONTACT &&
-                item.peerAge == selfAge &&
-                item.passedAt == null
-            ) {
+            if (item.kind == TransferKind.CONTACT && item.peerAge == selfAge) {
                 item.copy(card = base64(cardBytes), label = "Мой контакт")
             } else {
                 item
