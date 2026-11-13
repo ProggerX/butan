@@ -12,6 +12,7 @@ import dev.butan.data.AppState
 import dev.butan.data.Contact
 import dev.butan.data.ContactResult
 import dev.butan.data.ReceiveResult
+import dev.butan.data.TransferKind
 import dev.butan.nfc.NfcGateway
 import dev.butan.nfc.NfcSlot
 import kotlinx.coroutines.CompletableDeferred
@@ -23,11 +24,12 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.Base64
 import kotlin.random.Random
 
 data class BeamState(
-    val title: String = "Touch phones to sync",
-    val detail: String = "Both phones exchange all queued envelopes and contact cards automatically while Butan is open.",
+    val title: String = "Коснитесь телефонами",
+    val detail: String = "Пока Butan открыт, телефоны сами обмениваются сообщениями и контактами.",
     val progress: Float? = null,
 )
 
@@ -47,15 +49,71 @@ class ButanViewModel(application: Application) : AndroidViewModel(application) {
     private var lastPeerAge: String? = null
     private val recentlyReceived = linkedSetOf<String>()
 
-    fun send(contact: Contact, body: String, onQueued: () -> Unit) {
+    fun send(
+        peerAge: String,
+        peerName: String,
+        body: String,
+        onResult: (Boolean) -> Unit,
+    ) {
         viewModelScope.launch {
-            runCatching { store.sendMessage(contact, body) }
+            runCatching { store.sendMessage(peerAge, peerName, body) }
                 .onSuccess {
-                    _events.emit("Encrypted and queued for ${contact.name}")
-                    onQueued()
+                    _events.emit("Сообщение зашифровано и ждёт передачи")
+                    onResult(true)
                 }
-                .onFailure { _events.emit("Could not create message: ${it.message}") }
+                .onFailure {
+                    _events.emit("Не удалось создать сообщение: ${it.message}")
+                    onResult(false)
+                }
         }
+    }
+
+    fun shareContact(contact: Contact) {
+        viewModelScope.launch {
+            val item = runCatching { store.queueContactShare(contact) }.getOrNull()
+            _events.emit(
+                if (item == null) {
+                    "Эту карточку нельзя передать: нет исходной подписи"
+                } else {
+                    "Контакт «${contact.name}» добавлен в передачу"
+                },
+            )
+        }
+    }
+
+    fun shareOwnContact() {
+        viewModelScope.launch {
+            val item = runCatching { store.queueOwnContact() }.getOrNull()
+            _events.emit(
+                if (item == null) {
+                    "Не удалось подготовить вашу карточку"
+                } else {
+                    "Ваш контакт добавлен в передачу"
+                },
+            )
+        }
+    }
+
+    fun deleteTransfer(id: String) {
+        viewModelScope.launch {
+            val removed = runCatching { store.deleteTransfer(id) }.getOrDefault(false)
+            _events.emit(
+                if (removed) "Убрано из очереди передачи" else "Элемент уже не в очереди",
+            )
+        }
+    }
+
+    fun requeueMessage(messageId: String) {
+        viewModelScope.launch {
+            val queued = runCatching { store.requeueMessage(messageId) }.getOrDefault(false)
+            _events.emit(
+                if (queued) "Сообщение снова ждёт передачи" else "Не удалось вернуть сообщение в очередь",
+            )
+        }
+    }
+
+    fun markConversationRead(peerAge: String) {
+        viewModelScope.launch { store.markConversationRead(peerAge) }
     }
 
     fun onFocus(nfc: NfcGateway) {
@@ -98,8 +156,8 @@ class ButanViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (!nfc.enabled) {
                     _beam.value = BeamState(
-                        title = "NFC is off",
-                        detail = "Turn on NFC to sync with another phone.",
+                        title = "NFC выключен",
+                        detail = "Включите NFC, чтобы принимать и передавать сообщения.",
                     )
                     delay(1000)
                     continue
@@ -125,8 +183,8 @@ class ButanViewModel(application: Application) : AndroidViewModel(application) {
             discoveryTimeoutMs = discoveryMs,
             onResult = { deferred.complete(it) },
             onError = { _, _ -> deferred.complete(null) },
-            onReadProgress = { read, total -> publishProgress("Receiving…", read, total) },
-            onWriteProgress = { read, total -> publishProgress("Sending…", read, total) },
+            onReadProgress = { read, total -> publishProgress("Принимаем…", read, total) },
+            onWriteProgress = { read, total -> publishProgress("Передаём…", read, total) },
         )
 
         val result = withTimeoutOrNull(EXCHANGE_RESULT_TIMEOUT_MS) { deferred.await() }
@@ -139,16 +197,17 @@ class ButanViewModel(application: Application) : AndroidViewModel(application) {
 
         val summary = processIncoming(result.kind, result.payload)
         if (result.writeOk) {
-            for (id in bundle.sentIds) store.markSent(id)
+            // The handed-off items stay in our queue: only their pass history changes.
+            store.markTransferred(bundle.itemIds)
         }
 
         if (!summary.isNullOrBlank()) _events.emit(summary)
         _beam.value = BeamState(
-            title = "Synced",
+            title = "Синхронизировано",
             detail = summary ?: if (result.writeOk) {
-                "Both phones are up to date."
+                "Оба телефона получили новое."
             } else {
-                "Received data, but sending failed. It will be retried."
+                "Данные получены, но отправка не удалась. Попробуем ещё раз."
             },
             progress = 1f,
         )
@@ -166,8 +225,8 @@ class ButanViewModel(application: Application) : AndroidViewModel(application) {
         NfcSlot.arm(
             frame = bundle.frame,
             onDelivered = { delivered.complete(Unit) },
-            onProgress = { read, total -> publishProgress("Sending…", read, total) },
-            onWriteProgress = { read, total -> publishProgress("Receiving…", read, total) },
+            onProgress = { read, total -> publishProgress("Передаём…", read, total) },
+            onWriteProgress = { read, total -> publishProgress("Принимаем…", read, total) },
             onIncoming = { raw ->
                 viewModelScope.launch {
                     incoming.complete(processRawFrame(raw))
@@ -185,15 +244,19 @@ class ButanViewModel(application: Application) : AndroidViewModel(application) {
         }
         NfcSlot.disarm()
 
+        if (deliveredOk) {
+            store.markTransferred(bundle.itemIds)
+        }
+
         val summaryValue = summary
         if (deliveredOk || summaryValue != null) {
             if (!summaryValue.isNullOrBlank()) _events.emit(summaryValue)
             _beam.value = BeamState(
-                title = "Synced",
+                title = "Синхронизировано",
                 detail = summaryValue ?: if (deliveredOk) {
-                    "Sent to the other phone."
+                    "Передано на другой телефон."
                 } else {
-                    "The other phone is up to date."
+                    "Другой телефон уже всё получил."
                 },
                 progress = 1f,
             )
@@ -202,45 +265,60 @@ class ButanViewModel(application: Application) : AndroidViewModel(application) {
         _beam.value = BeamState()
     }
 
+    /**
+     * Builds one bundle: our own card, every contact card we were asked to pass,
+     * and all queued envelopes. Items stay in the queue after a hand-off and
+     * keep travelling until the user removes them.
+     */
     private fun buildBundle(current: AppState): BuiltBundle {
         val entries = mutableListOf<BundleEntry>()
-        entries += BundleEntry(
-            NfcFrame.KIND_CONTACT,
-            Butan.createContactCard(current.identity, current.profileName),
-        )
+        val itemIds = mutableListOf<String>()
+        val cardKeys = mutableSetOf<String>()
+        var truncated = false
 
-        val sentIds = mutableListOf<String>()
-        val queued = current.queue.sortedBy { it.addedAt }
-        var index = 0
+        val ownCard = Butan.createContactCard(current.identity, current.profileName)
+        entries += BundleEntry(NfcFrame.KIND_CONTACT, ownCard)
+        cardKeys += base64(ownCard)
 
-        while (index < queued.size) {
-            val item = queued[index]
-            val envelope = Butan.envelopeFromText(item.ciphertext)
-            if (envelope == null) {
-                index++
-                continue
+        val pending = current.queue
+            .sortedBy { it.addedAt }
+
+        for (item in pending) {
+            val entry = when (item.kind) {
+                TransferKind.CONTACT -> {
+                    val bytes = item.card?.let(::decodeBase64) ?: continue
+                    if (Butan.openContactCard(bytes) == null) continue
+                    val key = base64(bytes)
+                    if (key in cardKeys) {
+                        // The same card is already in this bundle, so it is delivered too.
+                        itemIds += item.id
+                        continue
+                    }
+                    BundleEntry(NfcFrame.KIND_CONTACT, bytes)
+                }
+
+                TransferKind.OUTGOING, TransferKind.RELAY -> {
+                    val envelope = Butan.envelopeFromText(item.ciphertext) ?: continue
+                    if (Butan.envelopeFingerprint(envelope) in recentlyReceived) continue
+                    BundleEntry(NfcFrame.KIND_ENVELOPE, envelope)
+                }
             }
 
-            if (Butan.envelopeFingerprint(envelope) in recentlyReceived) {
-                index++
-                continue
-            }
-
-            val candidate = BundleEntry(NfcFrame.KIND_ENVELOPE, envelope)
-            if (BundleCodec.encodedSize(entries + candidate) > BundleCodec.MAX_PAYLOAD_BYTES) {
+            if (BundleCodec.encodedSize(entries + entry) > BundleCodec.MAX_PAYLOAD_BYTES) {
+                truncated = true
                 break
             }
 
-            entries += candidate
-            sentIds += item.id
-            index++
+            entries += entry
+            if (entry.kind == NfcFrame.KIND_CONTACT) {
+                cardKeys += base64(entry.payload)
+            }
+            itemIds += item.id
         }
 
-        val hasMore = index < queued.size
-        val payload = BundleCodec.encode(entries, hasMore) ?: ByteArray(0)
+        val payload = BundleCodec.encode(entries, truncated) ?: ByteArray(0)
         val frame = NfcFrame.encode(NfcFrame.KIND_BUNDLE, payload)
-
-        return BuiltBundle(frame, sentIds, entries.size)
+        return BuiltBundle(frame, itemIds)
     }
 
     private suspend fun processRawFrame(raw: ByteArray): String? {
@@ -300,14 +378,14 @@ class ButanViewModel(application: Application) : AndroidViewModel(application) {
         if (received == 0 && carried == 0 && newContacts == 0) return null
 
         return buildString {
-            if (received > 0) append("$received received")
+            if (received > 0) append("Получено сообщений: $received")
             if (carried > 0) {
                 if (isNotEmpty()) append(" • ")
-                append("$carried carried")
+                append("Взято для передачи: $carried")
             }
             if (newContacts > 0) {
                 if (isNotEmpty()) append(" • ")
-                append("$newContacts new contact(s)")
+                append("Новых контактов: $newContacts")
             }
         }
     }
@@ -315,7 +393,7 @@ class ButanViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun processContact(payload: ByteArray): String? {
         val result = store.receiveContact(payload)
         return if (result is ContactResult.Saved && result.isNew) {
-            "New contact: ${result.contact.name}"
+            "Новый контакт: ${result.contact.name}"
         } else {
             null
         }
@@ -325,12 +403,12 @@ class ButanViewModel(application: Application) : AndroidViewModel(application) {
         when (val result = store.receiveEnvelope(payload)) {
             is ReceiveResult.Delivered -> {
                 rememberReceived(payload)
-                "New message from ${result.message.fromName}"
+                "Новое сообщение от ${result.message.peerName}"
             }
 
             ReceiveResult.Queued -> {
                 rememberReceived(payload)
-                "Envelope not for you — queued for the next phone"
+                "Сообщение не для вас — взяли для следующего телефона"
             }
 
             else -> null
@@ -349,17 +427,22 @@ class ButanViewModel(application: Application) : AndroidViewModel(application) {
         val fraction = (read.toFloat() / total.toFloat()).coerceIn(0f, 1f)
         _beam.value = BeamState(
             title = direction,
-            detail = "Exchanging contact cards and queued envelopes.",
+            detail = "Обмениваемся контактами и сообщениями.",
             progress = fraction,
         )
     }
 
     private fun randomPhaseMs(): Long = PHASE_MIN_MS + Random.nextLong(PHASE_JITTER_MS)
 
+    private fun base64(bytes: ByteArray): String =
+        Base64.getEncoder().withoutPadding().encodeToString(bytes)
+
+    private fun decodeBase64(text: String): ByteArray? =
+        runCatching { Base64.getDecoder().decode(text) }.getOrNull()
+
     private data class BuiltBundle(
         val frame: ByteArray,
-        val sentIds: List<String>,
-        val entryCount: Int,
+        val itemIds: List<String>,
     )
 
     private companion object {
